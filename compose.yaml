@@ -1,0 +1,179 @@
+services:
+  # Caddy reverse proxy — config-only directory, no Dockerfile exists.
+  # NOTE: A Dockerfile must be created at ./caddy with:
+  #   FROM caddy:2-alpine
+  #   COPY Caddyfile /etc/caddy/Caddyfile
+  caddy:
+    build:
+      context: ./caddy
+    ports:
+      - mode: ingress
+        target: 2080
+        published: 2080
+    depends_on:
+      - elixir-api
+      - rust-ws
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # Elixir Phoenix REST API — connects to CockroachDB (port 26257) and NATS (port 4222)
+  elixir-api:
+    build:
+      context: ./elixir-api
+    ports:
+      - mode: host
+        target: 4000
+        published: 4000
+    environment:
+      - DATABASE_HOST=cockroachdb
+      - DATABASE_PORT=26257
+      - DATABASE_USER=root
+      - DATABASE_PASSWORD
+      - DATABASE_NAME=chaos_events
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # Rust WebSocket server — connects to NATS (port 4222) and Redpanda/Kafka (port 9092)
+  rust-ws:
+    build:
+      context: ./rust-ws
+    ports:
+      - mode: host
+        target: 9090
+        published: 9090
+    environment:
+      - NATS_URL=nats://nats:4222
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      nats:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # Haskell background worker — connects to ScyllaDB (port 9042) and NATS (port 4222)
+  haskell-worker:
+    build:
+      context: ./haskell-worker
+    environment:
+      - SCYLLA_HOST=scylladb
+      - SCYLLA_PORT=9042
+      - NATS_URL=nats://nats:4222
+      - POLL_INTERVAL=10
+      - WORKER_NAME=haskell-worker-1
+    depends_on:
+      scylladb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # NATS message broker — config-only directory, no Dockerfile exists.
+  # NOTE: A Dockerfile must be created at ./nats with:
+  #   FROM nats:2-alpine
+  #   COPY nats-server.conf /etc/nats/nats-server.conf
+  #   CMD ["-c", "/etc/nats/nats-server.conf"]
+  nats:
+    build:
+      context: ./nats
+    ports:
+      - mode: host
+        target: 4222
+        published: 4222
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # CockroachDB — distributed SQL database (PostgreSQL wire-compatible on port 26257).
+  # NOT replaced with PostgreSQL — the Elixir API explicitly connects to port 26257.
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.2.0
+    command: start-single-node --insecure --advertise-addr=cockroachdb
+    ports:
+      - mode: host
+        target: 26257
+        published: 26257
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ScyllaDB — wide-column store (Cassandra-compatible on port 9042).
+  # NOT replaced with Cassandra — the Haskell worker explicitly connects to ScyllaDB.
+  scylladb:
+    image: scylladb/scylla:5.4
+    ports:
+      - mode: host
+        target: 9042
+        published: 9042
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # Redpanda — Kafka-compatible event streaming broker on port 9092.
+  # The Rust WS server connects to it as KAFKA_BROKERS=redpanda:9092.
+  redpanda:
+    image: redpandadata/redpanda:v23.3.21
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=redpanda:9092
+    ports:
+      - mode: host
+        target: 9092
+        published: 9092
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        reservations:
+          cpus: "0.5"
+          memory: 512M
