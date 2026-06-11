@@ -1,0 +1,53 @@
+name: Defang
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Whether to deploy up or down
+        required: true
+        default: up
+        type: choice
+        options:
+          - up
+          - down
+      stack:
+        description: The stack to deploy up or down. (Leave blank for default)
+        default: bob
+jobs:
+  defang:
+    name: Defang ${{ github.event.inputs.action || 'up' }} ${{ github.event.inputs.stack || 'bob' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      cancel-in-progress: false
+      group: deploy-compose-gen-test-${{ github.event.inputs.stack || 'bob' }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Defang ${{ github.event.inputs.action || 'up' }} ${{ github.event.inputs.stack || 'bob' }}
+        uses: DefangLabs/defang-github-action@v2
+        with:
+          command: ${{ github.event.inputs.action || 'up' }}
+          project: compose-gen-test
+          stack: ${{ github.event.inputs.stack || 'bob' }}
+          compose-files: elixir-api/Dockerfile
+      - name: Deployment Summary
+        uses: DefangLabs/defang-github-action@v2
+        with:
+          command: services
+          project: compose-gen-test
+          stack: ${{ github.event.inputs.stack || 'bob' }}
+          compose-file: elixir-api/Dockerfile
+    environment: defang-bob
